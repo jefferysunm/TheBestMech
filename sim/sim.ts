@@ -611,35 +611,21 @@ export class Sim {
     if (spent) m.lastSpend = this.t
     else if (this.t - m.lastSpend > S.energy_regen_delay) m.energy = Math.min(S.energy, m.energy + S.energy_regen * dt)
     if (!m.grounded) m.vz -= S.gravity * dt
-    // horizontal move with sliding
-    const R = S.radius
-    const blockedAt = (x: number, y: number, z: number) => {
-      if (!w.inBounds(x, y, R)) return true
-      for (let k = 0; k <= 8; k++) {
-        const sx = k === 8 ? x : x + Math.cos((k * Math.PI) / 4) * R * 0.95
-        const sy = k === 8 ? y : y + Math.sin((k * Math.PI) / 4) * R * 0.95
-        const c = w.cellOf(sx, sy)
-        const z0 = z + S.step_up, z1 = z + S.height
-        if (z0 >= w.cellTop[c]) continue
-        for (let q = w.cellStart[c]; q < w.cellStart[c + 1]; q++) {
-          const p = w.cellList[q]
-          if (w.pBase[p] < z1 && w.pTop[p] > z0) return true
-        }
-      }
-      // terrain slope at centre
-      const g0 = w.ground(m.x, m.y), g1 = w.ground(x, y)
-      const hd = Math.hypot(x - m.x, y - m.y)
-      if (g1 > z + S.step_up && g1 - g0 > Math.tan((S.max_slope_deg * Math.PI) / 180) * Math.max(hd, 0.05)) return true
-      return false
-    }
+    // horizontal move with sliding; a move that leaves us overlapping less than before is allowed (gets unstuck)
     const nx = m.x + m.vx * dt, ny = m.y + m.vy * dt
-    if (!blockedAt(nx, ny, m.z)) {
+    const cur = this.overlap(m, m.x, m.y, m.z)
+    const ok = (x: number, y: number) => {
+      const o = this.overlap(m, x, y, m.z)
+      if (o < 0) return false
+      return o === 0 || o < cur || (o === cur && cur > 0)
+    }
+    if (ok(nx, ny)) {
       m.x = nx
       m.y = ny
-    } else if (!blockedAt(nx, m.y, m.z)) {
+    } else if (ok(nx, m.y)) {
       m.x = nx
       m.vy = 0
-    } else if (!blockedAt(m.x, ny, m.z)) {
+    } else if (ok(m.x, ny)) {
       m.y = ny
       m.vx = 0
     } else {
@@ -665,7 +651,8 @@ export class Sim {
           m.vz = 0
         }
       }
-      const fl = w.floorBelow(m.x, m.y, Math.max(m.z, nz) + 0.01)
+      // land on anything whose top is within a step of our feet (so we never sink into a column we moved over)
+      const fl = w.floorBelow(m.x, m.y, Math.max(m.z, nz) + S.step_up)
       if (nz <= fl) {
         nz = fl
         m.vz = 0
@@ -682,6 +669,34 @@ export class Sim {
         this.sound(wantBoost && m.energy > 0 ? "boost" : "step", m.x, m.y, m.id)
       }
     }
+  }
+
+  /** number of cylinder sample points inside a solid at (x,y,z); -1 if out of bounds / centre blocked / too steep */
+  overlap(m: Mech, x: number, y: number, z: number): number {
+    const S = m.stats
+    const w = this.world
+    const R = S.radius
+    if (!w.inBounds(x, y, R)) return -1
+    let n = 0
+    for (let k = 0; k <= 8; k++) {
+      const sx = k === 8 ? x : x + Math.cos((k * Math.PI) / 4) * R * 0.95
+      const sy = k === 8 ? y : y + Math.sin((k * Math.PI) / 4) * R * 0.95
+      const c = w.cellOf(sx, sy)
+      const z0 = z + S.step_up, z1 = z + S.height
+      if (z0 >= w.cellTop[c]) continue
+      for (let q = w.cellStart[c]; q < w.cellStart[c + 1]; q++) {
+        const p = w.cellList[q]
+        if (w.pBase[p] < z1 && w.pTop[p] > z0) {
+          if (k === 8) return -1
+          n++
+          break
+        }
+      }
+    }
+    const g0 = w.ground(m.x, m.y), g1 = w.ground(x, y)
+    const hd = Math.hypot(x - m.x, y - m.y)
+    if (g1 > z + S.step_up && g1 - g0 > Math.tan((S.max_slope_deg * Math.PI) / 180) * Math.max(hd, 0.05)) return -1
+    return n
   }
 
   fireWeapons(m: Mech, dt: number) {
@@ -1137,10 +1152,14 @@ export class Sim {
         if (d < R && d > 1e-6 && Math.abs(a.z - b.z) < 8) {
           const push = (R - d) / 2
           const ux = (a.x - b.x) / d, uy = (a.y - b.y) / d
-          a.x += ux * push
-          a.y += uy * push
-          b.x -= ux * push
-          b.y -= uy * push
+          if (this.overlap(a, a.x + ux * push, a.y + uy * push, a.z) === 0) {
+            a.x += ux * push
+            a.y += uy * push
+          }
+          if (this.overlap(b, b.x - ux * push, b.y - uy * push, b.z) === 0) {
+            b.x -= ux * push
+            b.y -= uy * push
+          }
         }
       }
   }

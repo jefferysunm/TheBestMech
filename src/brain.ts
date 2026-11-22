@@ -39,6 +39,7 @@ type Track = {
 type Item = { id: number; kind: string; x: number; y: number; z: number; t: number; hp: number }
 
 type Mode = "zone" | "retreat" | "fight" | "hunt" | "loot" | "drop" | "position" | "evade"
+type Plan = { mode: Mode; dest: V2 | null; target: Track | null; urgent: boolean; face: number | null; why?: string }
 
 const PROFILE = typeof process !== "undefined" && !!process.env?.MECH_PROFILE
 const WEAPON_RANK: Record<string, number> = { laser: 3, lightning: 2, mortar: 1, gun: 0 }
@@ -120,6 +121,8 @@ export class Brain {
   lastProgressPos: V2 = [0, 0]
   lastProgressT = 0
   climbing = false
+  climbStart = -1
+  climbNeedAhead = 0
   climbTarget = 0
 
   // combat state
@@ -137,6 +140,7 @@ export class Brain {
   retreatSpotT = -99
   lookYaw = 0
   prevAlive = 16
+  lock: { mode: Mode; until: number; dest: V2 | null } | null = null
 
   constructor(hello: Hello, opts: BrainOpts = {}) {
     this.cfg = hello.config
@@ -434,7 +438,29 @@ export class Brain {
   }
 
   // ------------------------------------------------------------------ decision
-  decide(): { mode: Mode; dest: V2 | null; target: Track | null; urgent: boolean; face: number | null; why?: string } {
+  decide(): Plan {
+    const p = this.decideRaw()
+    const t = this.t
+    const lk = this.lock
+    // hysteresis: don't flip out of retreat/fight immediately (it thrashes between cover and exposure)
+    if (lk && t < lk.until && p.mode !== "zone") {
+      if (lk.mode === "retreat" && (p.mode === "loot" || p.mode === "position" || p.mode === "hunt" || p.mode === "drop" || (p.mode === "fight" && this.modeWhy !== "great"))) {
+        const spot = this.retreatSpot
+        this.modeWhy = "hold"
+        return { ...p, mode: "retreat", dest: spot ? [spot[0], spot[1]] : lk.dest, urgent: true }
+      }
+      if (lk.mode === "fight" && (p.mode === "loot" || p.mode === "position" || p.mode === "hunt") && p.target && p.target.kind === "mech") {
+        this.modeWhy = "hold"
+        return { ...p, mode: "fight", dest: null }
+      }
+    }
+    if (p.mode === "retreat" && (!lk || lk.mode !== "retreat" || t >= lk.until)) this.lock = { mode: "retreat", until: t + 2.5, dest: p.dest }
+    else if (p.mode === "retreat" && lk) lk.dest = p.dest
+    if (p.mode === "fight" && (!lk || lk.mode !== "fight" || t >= lk.until)) this.lock = { mode: "fight", until: t + 1.2, dest: null }
+    return p
+  }
+
+  decideRaw(): Plan {
     const t = this.t
     const me = this.me
     const hpFrac = me.hp / me.max_hp
@@ -520,6 +546,7 @@ export class Brain {
       const great = ratio > 1.6 / this.aggression || target.hp < 250
       if (theySee) {
         if (great || (good && others === 0 && d < 110)) {
+          if (great) this.modeWhy = "great"
           return { mode: "fight", dest: null, target, urgent: false, face: null }
         }
         const spot = this.findCover(seeingMe)
@@ -816,7 +843,13 @@ export class Brain {
     const me = this.me
     const t = this.t
     const zone = this.zoneNow()
-    const ok = (x: number, y: number) => Math.hypot(x - zone.x, y - zone.y) < zone.r - 15 && this.inZoneAt(x, y, t + 20, 5)
+    const watchers = this.threats(8).filter((tr) => this.dist(tr.x, tr.y) < 170)
+    const exposed = (x: number, y: number) => {
+      const h = this.surface(x, y)
+      for (const tr of watchers) if (Math.hypot(tr.x - x, tr.y - y) < 170 && this.los(tr.x, tr.y, tr.z + 8, x, y, h + 5)) return true
+      return false
+    }
+    const ok = (x: number, y: number) => Math.hypot(x - zone.x, y - zone.y) < zone.r - 15 && this.inZoneAt(x, y, t + 20, 5) && !exposed(x, y)
     let best: { dest: V2; why: string; target?: Track } | null = null
     let bestS = 0
     // cubes: walk over them
@@ -919,7 +952,7 @@ export class Brain {
   }
 
   // ------------------------------------------------------------------ movement
-  movement(plan: ReturnType<Brain["decide"]>): { move: V2; boost: boolean; jump: boolean } {
+  movement(plan: Plan): { move: V2; boost: boolean; jump: boolean } {
     const me = this.me
     let move: V2 = [0, 0]
     let boost = false
@@ -949,9 +982,9 @@ export class Brain {
     const wantMove = Math.hypot(move[0], move[1]) > 0.3
     // ground boost when it matters and energy allows
     if (wantMove && me.grounded && !jump) {
-      const reserve = 35
+      const reserve = Math.max(35, this.climbNeedAhead + 15)
       if ((plan.urgent && me.energy > reserve) || (plan.mode === "retreat" && me.energy > 20) || (plan.mode === "evade" && me.energy > 15)) boost = true
-      if (plan.mode === "zone" && !me.in_zone && me.energy > 10) boost = true
+      if (plan.mode === "zone" && !me.in_zone && me.energy > Math.max(10, this.climbNeedAhead + 5)) boost = true
     }
 
     // stuck detection: wanted to move, barely moved
@@ -962,8 +995,9 @@ export class Brain {
         this.lastProgressT = t
       } else if (t - this.lastProgressT > 1.2 && speedNow < 3) {
         if (this.stuckSince < 0) this.stuckSince = t
-        // try a hop first, then a sideways shuffle with a replan
+        // try a hop first, then a sideways shuffle with a replan; if we're hung up in the air, jet
         if (me.grounded && me.energy > 15) jump = true
+        else if (!me.grounded && Math.abs(me.vel[2]) < 1 && me.energy > 5) boost = true
         if (t - this.stuckSince > 1.5 && t > this.unstickUntil) {
           const a = this.rng.range(-Math.PI, Math.PI)
           this.unstickDir = [Math.cos(a), Math.sin(a)]
@@ -1001,6 +1035,7 @@ export class Brain {
     // direct when the straight line is walkable and short
     if (d < 60 && nav.walkable(this.px, this.py, this.pz, gx, gy, 1.1, 2.6)) {
       this.climbing = false
+      this.climbNeedAhead = 0
       const [ux, uy] = norm2(gx - this.px, gy - this.py)
       return { move: [ux, uy], jump: false, jet: false, arrived: false }
     }
@@ -1047,16 +1082,41 @@ export class Brain {
       }
     }
     this.pathIdx = Math.max(this.pathIdx, bestK)
-    // climbing: is the next node much higher than our feet?
-    const next = path[this.pathIdx]
+    // energy we'll want for the biggest climb in the next ~60 m of path (so we don't spend it boosting)
+    this.climbNeedAhead = 0
+    {
+      let prevH = this.pz
+      let walked = 0
+      for (let k = this.pathIdx; k < path.length && walked < 60; k++) {
+        const dh = path[k][2] - prevH
+        if (dh > 2.2) this.climbNeedAhead = Math.max(this.climbNeedAhead, this.climbEnergy(dh))
+        if (k > this.pathIdx) walked += Math.hypot(path[k][0] - path[k - 1][0], path[k][1] - path[k - 1][1])
+        prevH = path[k][2]
+      }
+    }
+    // climbing: is the next stretch much higher than our feet? (a wall is often 2-3 nodes: base, rim, top)
+    let next = path[this.pathIdx]
+    for (let k = this.pathIdx + 1; k < Math.min(path.length, this.pathIdx + 4); k++) {
+      if (Math.hypot(path[k][0] - this.px, path[k][1] - this.py) > 9) break
+      if (path[k][2] > next[2]) next = path[k]
+    }
     const rise = next[2] - this.pz
     if (rise > 1.0) {
       const hd = Math.hypot(next[0] - this.px, next[1] - this.py)
-      const need = (rise / 10) * (me.stats.jet_drain ?? 15) + 5
+      const need = this.climbEnergy(rise)
       const [ux, uy] = norm2(next[0] - this.px, next[1] - this.py)
+      if (this.climbing && t - this.climbStart > 7) {
+        // this climb isn't working: give up on this goal for a while
+        this.climbing = false
+        this.unreachable.set(this.ukey(gx, gy), t + 30)
+        this.path = null
+        const [vx, vy] = norm2(this.px - next[0], this.py - next[1])
+        return { move: [vx, vy], jump: false, jet: false, arrived: false }
+      }
       if (hd < 7 || this.climbing) {
         if (me.grounded) {
-          if (rise <= 2.4 || me.energy >= Math.min(need, 95)) {
+          if (rise <= 2.2 || me.energy >= Math.min(need, me.max_energy * 0.95)) {
+            if (!this.climbing) this.climbStart = t
             this.climbing = true
             this.climbTarget = next[2]
             return { move: [ux, uy], jump: true, jet: false, arrived: false }
@@ -1081,6 +1141,13 @@ export class Brain {
     const [ux, uy] = norm2(w[0] - this.px, w[1] - this.py)
     // airborne without wanting to climb: no jets
     return { move: [ux, uy], jump: false, jet: false, arrived: false }
+  }
+
+  /** energy to climb `rise` metres: the jump gives ~2.5 m for free, jets rise at max_rise_speed */
+  climbEnergy(rise: number): number {
+    const st = this.me.stats
+    const jetRise = Math.max(0, rise + 0.8 - 2.5)
+    return (jetRise / (st.max_rise_speed ?? 10)) * (st.jet_drain ?? 15) * 1.25 + 6
   }
 
   dodgeShells(): V2 | null {
@@ -1111,7 +1178,7 @@ export class Brain {
   }
 
   // ------------------------------------------------------------------ aim & fire
-  aimAndFire(plan: ReturnType<Brain["decide"]>): { aim: V2; fire: [boolean, boolean]; reload: boolean } {
+  aimAndFire(plan: Plan): { aim: V2; fire: [boolean, boolean]; reload: boolean } {
     const me = this.me
     const t = this.t
     const fire: [boolean, boolean] = [false, false]
@@ -1304,7 +1371,7 @@ export class Brain {
   }
 
   /** torso yaw when there's nothing to shoot: look at what's dangerous, else sweep */
-  scanYaw(plan: ReturnType<Brain["decide"]>): number {
+  scanYaw(plan: Plan): number {
     const t = this.t
     // recent damage from someone we can't see
     for (let k = this.damageLog.length - 1; k >= 0; k--) {
