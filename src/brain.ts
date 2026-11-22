@@ -146,6 +146,11 @@ export class Brain {
   lookYaw = 0
   prevAlive = 16
   lock: { mode: Mode; until: number; dest: V2 | null } | null = null
+  tickStart = 0
+  /** ms spent in this decision so far */
+  elapsed() {
+    return performance.now() - this.tickStart
+  }
 
   constructor(hello: Hello, opts: BrainOpts = {}) {
     this.cfg = hello.config
@@ -223,6 +228,7 @@ export class Brain {
   // ------------------------------------------------------------------ main
   act(obs: Observation): Omit<Action, "tick"> {
     const t0 = performance.now()
+    this.tickStart = t0
     this.obs = obs
     this.t = obs.t
     this.me = obs.self
@@ -1159,7 +1165,13 @@ export class Brain {
       const w = this.path[this.pathIdx]
       if (Math.hypot(w[0] - this.px, w[1] - this.py) > 14 && !this.climbing) offPath = true
     }
-    if (!this.path || goalMoved || offPath || t - this.pathT > 3 || this.pathIdx >= this.path.length) {
+    const needPlan = !this.path || goalMoved || offPath || t - this.pathT > 3 || this.pathIdx >= this.path.length
+    // over budget this tick: keep the old path (or go straight) and plan next tick
+    if (needPlan && this.elapsed() > 20 && this.path) {
+    } else if (needPlan && this.elapsed() > 20) {
+      const [ux, uy] = norm2(gx - this.px, gy - this.py)
+      return { move: [ux, uy], jump: false, jet: false, arrived: false }
+    } else if (needPlan) {
       const z = zoneAt(this.obs.zone, t + 10)
       const maxClimb = noClimb ? 2.4 : clamp((me.energy - 10) / 1.5 + 3, 2.5, 40)
       this.path = nav.plan(this.px, this.py, this.pz, gx, gy, {
@@ -1167,7 +1179,7 @@ export class Brain {
         zonePenalty: 2 + this.obs.zone.dps / 20,
         maxClimb: noClimb ? maxClimb : Math.max(maxClimb, 12),
         climbCost: 3,
-        maxExpand: this.mode === "zone" || this.mode === "position" ? 45000 : 20000,
+        maxExpand: this.mode === "zone" || this.mode === "position" ? 32000 : 20000,
       })
       if (!nav.lastReached) this.unreachable.set(this.ukey(gx, gy), t + 25)
       this.pathGoal = [gx, gy]
