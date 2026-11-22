@@ -122,6 +122,7 @@ export class Brain {
   lastProgressT = 0
   climbing = false
   climbStart = -1
+  pathNoClimb = false
   climbNeedAhead = 0
   climbTarget = 0
 
@@ -523,10 +524,21 @@ export class Brain {
       return { mode: "zone", dest: safe, target, urgent: true, face: null }
     }
     if (retreat) {
-      const from = seeingMe.length ? seeingMe : visible
+      const from = seeingMe.length ? [...seeingMe] : [...visible]
+      const ghost = this.unseenAttacker()
+      if (ghost) from.push(ghost)
       const spot = this.findCover(from)
       this.modeWhy = lowHp ? "lowhp" : "losing"
       return { mode: "retreat", dest: spot ? [spot[0], spot[1]] : this.awayPoint(from), target, urgent: true, face: null }
+    }
+    // being shot by someone we can't see: take cover from where it came from (the torso turns to look, scanYaw)
+    if (!target || target.kind === "npc" || !seeingMe.includes(target)) {
+      const ghost = this.unseenAttacker()
+      if (ghost) {
+        const spot = this.findCover([ghost])
+        this.modeWhy = "unseen"
+        return { mode: "retreat", dest: spot ? [spot[0], spot[1]] : this.awayPoint([ghost]), target: null, urgent: true, face: null }
+      }
     }
     if (laserThreat && !target) {
       const spot = this.findCover([laserThreat])
@@ -549,7 +561,8 @@ export class Brain {
           if (great) this.modeWhy = "great"
           return { mode: "fight", dest: null, target, urgent: false, face: null }
         }
-        const spot = this.findCover(seeingMe)
+        const ghost = this.unseenAttacker()
+        const spot = this.findCover(ghost ? [...seeingMe, ghost] : seeingMe)
         if (spot && this.dist(spot[0], spot[1]) > 2) {
           this.modeWhy = "disengage"
           return { mode: "retreat", dest: [spot[0], spot[1]], target, urgent: true, face: null }
@@ -581,6 +594,34 @@ export class Brain {
     // default: get to a good spot inside the next circle
     const spot = this.campPoint()
     return { mode: "position", dest: spot, target: target && target.kind === "mech" ? target : null, urgent: zoneSoon, face: null }
+  }
+
+  lastHitBearing(): number | null {
+    for (let k = this.damageLog.length - 1; k >= 0; k--) {
+      const d = this.damageLog[k]
+      if (d.weapon !== "zone" && d.bearing !== null) return d.bearing
+    }
+    return null
+  }
+
+  /** a stand-in track for whoever hit us recently without being in view (estimated from the hit bearing) */
+  unseenAttacker(): Track | null {
+    const t = this.t
+    for (let k = this.damageLog.length - 1; k >= 0; k--) {
+      const d = this.damageLog[k]
+      if (t - d.t > 2.5) break
+      if (d.weapon === "zone" || d.weapon === "npc" || d.bearing === null) continue
+      const tr = d.by !== null ? this.tracks.get(d.by) : undefined
+      if (tr && tr.listed) continue
+      const est = d.weapon === "lightning" ? 35 : d.weapon === "mortar" ? 130 : 110
+      const x = this.px + Math.cos(d.bearing) * est, y = this.py + Math.sin(d.bearing) * est
+      return {
+        id: d.by ?? -1, kind: "mech", x, y, z: this.surface(x, y), vx: 0, vy: 0, vz: 0, yaw: d.bearing + Math.PI, pitch: 0,
+        hp: 1400, maxHp: 1400, cubes: 0, weapons: [d.weapon], charging: false, firstSeen: t, lastSeen: t, listed: false,
+        attackedMeT: d.t, hitByMeT: -99, homeX: x, homeY: y,
+      }
+    }
+    return null
   }
 
   pickTarget(visible: Track[]): Track | null {
@@ -808,7 +849,7 @@ export class Brain {
       if (hidden === 0) continue
       let s = (hidden / from.length) * 100 - d * 1.2 + Math.min(minD, 150) * 0.15
       if (Math.hypot(x - z.x, y - z.y) > z.r - 5) s -= 150
-      if (d > 3 && !this.nav.walkable(this.px, this.py, this.pz, x, y, 1.6, 2.6)) s -= 40
+      if (d > 3 && !this.nav.walkable(this.px, this.py, this.pz, x, y, 1.6, 2.6)) s -= 70
       if (s > bestS) {
         bestS = s
         best = c
@@ -961,10 +1002,23 @@ export class Brain {
     const dest = plan.dest
 
     if (dest) {
-      const nv = this.navigate(dest[0], dest[1], plan.mode === "fight" ? 2.5 : 4)
+      const fleeing = plan.mode === "retreat" || plan.mode === "evade"
+      const nv = this.navigate(dest[0], dest[1], plan.mode === "fight" ? 2.5 : fleeing ? 2 : 4, fleeing && this.t - this.lastDamageT < 6)
       move = nv.move
       jump = nv.jump
       boost = nv.jet
+      if (fleeing && Math.hypot(move[0], move[1]) < 0.1 && this.t - this.lastDamageT < 1.2) {
+        // at the "cover" spot but still getting hit: keep moving, sideways to the incoming fire
+        const b = this.lastHitBearing()
+        if (b !== null) {
+          if (this.t > this.strafeUntil) {
+            this.strafeSign = -this.strafeSign
+            this.strafeUntil = this.t + this.rng.range(0.4, 0.9)
+          }
+          move = [-Math.sin(b) * this.strafeSign, Math.cos(b) * this.strafeSign]
+          this.retreatSpotT = -99 // re-evaluate cover next tick
+        }
+      }
     } else if (plan.mode === "fight" && plan.target) {
       const cm = this.combatMove(plan.target)
       move = cm.move
@@ -1019,7 +1073,7 @@ export class Brain {
   }
 
   /** follow an A* path toward (gx, gy). Handles climbing (jump + jet) onto higher nodes. */
-  navigate(gx: number, gy: number, arriveR: number): { move: V2; jump: boolean; jet: boolean; arrived: boolean } {
+  navigate(gx: number, gy: number, arriveR: number, noClimb = false): { move: V2; jump: boolean; jet: boolean; arrived: boolean } {
     const me = this.me
     const d = this.dist(gx, gy)
     if (d < arriveR) {
@@ -1039,7 +1093,8 @@ export class Brain {
       const [ux, uy] = norm2(gx - this.px, gy - this.py)
       return { move: [ux, uy], jump: false, jet: false, arrived: false }
     }
-    const goalMoved = !this.pathGoal || Math.hypot(this.pathGoal[0] - gx, this.pathGoal[1] - gy) > Math.max(6, d * 0.15)
+    const goalMoved = !this.pathGoal || Math.hypot(this.pathGoal[0] - gx, this.pathGoal[1] - gy) > Math.max(6, d * 0.15) || noClimb !== this.pathNoClimb
+    this.pathNoClimb = noClimb
     let offPath = false
     if (this.path && this.pathIdx < this.path.length) {
       const w = this.path[this.pathIdx]
@@ -1047,11 +1102,11 @@ export class Brain {
     }
     if (!this.path || goalMoved || offPath || t - this.pathT > 3 || this.pathIdx >= this.path.length) {
       const z = zoneAt(this.obs.zone, t + 10)
-      const maxClimb = clamp((me.energy - 10) / 1.5 + 3, 2.5, 40)
+      const maxClimb = noClimb ? 2.4 : clamp((me.energy - 10) / 1.5 + 3, 2.5, 40)
       this.path = nav.plan(this.px, this.py, this.pz, gx, gy, {
         zone: z,
         zonePenalty: 2 + this.obs.zone.dps / 20,
-        maxClimb: Math.max(maxClimb, 12),
+        maxClimb: noClimb ? maxClimb : Math.max(maxClimb, 12),
         climbCost: 3,
         maxExpand: this.mode === "zone" || this.mode === "position" ? 45000 : 20000,
       })
@@ -1195,7 +1250,7 @@ export class Brain {
 
     // crate shooting when looting crates
     let crateTarget: Item | null = null
-    if (!target && plan.mode === "loot" && this.modeWhy === "crate") {
+    if (!target && plan.mode === "loot" && this.modeWhy === "crate" && t - this.lastDamageT > 3) {
       let bd = Infinity
       for (const c of this.obs.crates) {
         const d = this.dist(c.pos[0], c.pos[1])
