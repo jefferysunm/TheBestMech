@@ -71,8 +71,29 @@ function settle() {
   } catch {}
 }
 
+/** last resort if the real brain can't be built: walk to the zone, shoot what we see */
+function fallback(hello: Hello) {
+  return {
+    name: "TheBestMech",
+    act(obs: Observation) {
+      const [x, y, z] = obs.self.pos
+      const g = obs.zone?.next_center ?? [x, y]
+      const yaw = Math.atan2(g[1] - y, g[0] - x)
+      const e = obs.mechs.filter((m) => m.kind === "mech").sort((a, b) => Math.hypot(a.pos[0] - x, a.pos[1] - y) - Math.hypot(b.pos[0] - x, b.pos[1] - y))[0]
+      const aim: [number, number] = e ? [Math.atan2(e.pos[1] - y, e.pos[0] - x), Math.atan2(e.pos[2] + 4.5 - z - 7, Math.hypot(e.pos[0] - x, e.pos[1] - y))] : [yaw, 0]
+      return { move: [Math.cos(yaw), Math.sin(yaw)] as [number, number], aim, fire: [!!e, !!e] as [boolean, boolean], boost: !obs.self.in_zone, ...(obs.offer ? { pick: 0 } : {}) }
+    },
+  }
+}
+
 run((hello) => {
-  const brain = new Brain(hello)
+  let brain: Brain
+  try {
+    brain = new Brain(hello)
+  } catch (e) {
+    log("brain failed to start, using fallback:", e)
+    return fallback(hello)
+  }
   try {
     warmup(hello, brain)
   } catch (e) {
