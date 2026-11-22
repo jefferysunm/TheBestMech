@@ -128,6 +128,7 @@ export class Brain {
   climbStart = -1
   pathNoClimb = false
   climbNeedAhead = 0
+  avoidSpots: { x: number; y: number; r: number; cost: number; until: number }[] = []
   climbTarget = 0
 
   // combat state
@@ -1179,6 +1180,7 @@ export class Brain {
         zonePenalty: 2 + this.obs.zone.dps / 20,
         maxClimb: noClimb ? maxClimb : Math.max(maxClimb, 12),
         climbCost: 3,
+        avoid: this.avoidSpots.length ? (this.avoidSpots = this.avoidSpots.filter((a) => a.until > t)) : undefined,
         maxExpand: this.mode === "zone" || this.mode === "position" ? 32000 : 20000,
       })
       if (!nav.lastReached) this.unreachable.set(this.ukey(gx, gy), t + 25)
@@ -1201,6 +1203,8 @@ export class Brain {
     // skip nodes we're past: closest node among the next few
     let bestK = this.pathIdx, bestD = Infinity
     for (let k = this.pathIdx; k < Math.min(path.length, this.pathIdx + 8); k++) {
+      // never skip past a node we still have to climb onto (mid-jump, nodes beyond a wall look "reachable")
+      if (path[k][2] > this.pz + 1.0) break
       const dd = Math.hypot(path[k][0] - this.px, path[k][1] - this.py)
       if (dd < bestD && this.pz > path[k][2] - 1.5) {
         bestD = dd
@@ -1232,9 +1236,10 @@ export class Brain {
       const need = this.climbEnergy(rise)
       const [ux, uy] = norm2(next[0] - this.px, next[1] - this.py)
       if (this.climbing && t - this.climbStart > 7) {
-        // this climb isn't working: give up on this goal for a while
+        // this climb isn't working: give up on this goal and route around this wall for a while
         this.climbing = false
         this.unreachable.set(this.ukey(gx, gy), t + 30)
+        this.avoidSpots.push({ x: next[0], y: next[1], r: 7, cost: 40, until: t + 30 })
         this.path = null
         const [vx, vy] = norm2(this.px - next[0], this.py - next[1])
         return { move: [vx, vy], jump: false, jet: false, arrived: false }
