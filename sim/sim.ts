@@ -63,6 +63,9 @@ type Mech = {
   maxMs: number
   modes: Record<string, number>
   trail: [number, number][]
+  shots: number
+  gunHits: number
+  gunHitsTaken: number
 }
 
 type Npc = { id: number; x: number; y: number; z: number; vx: number; vy: number; hx: number; hy: number; hp: number; target: number | null; cooldown: number; gx: number; gy: number; aggroBy: number | null; yaw: number }
@@ -71,7 +74,7 @@ type Item = { id: number; x: number; y: number; z: number; hp?: number; kind?: s
 type Sound = { t: number; kind: string; x: number; y: number; src: number }
 type Drop = { id: number; x: number; y: number; z: number; landT: number; holder: number | null; progress: number; taken: boolean }
 
-export type SimResult = { places: { id: number; name: string; place: number; kills: number; cubes: number; dmgTaken: number; dmgDealt: number; zoneDmg: number; cause: string; maxMs: number; late: number; modes: Record<string, number> }[]; duration: number; mechs: Mech[] }
+export type SimResult = { places: { shots: number; gunHits: number; gunHitsTaken: number; id: number; name: string; place: number; kills: number; cubes: number; dmgTaken: number; dmgDealt: number; zoneDmg: number; cause: string; maxMs: number; late: number; modes: Record<string, number> }[]; duration: number; mechs: Mech[] }
 
 export class Sim {
   cfg: any
@@ -187,7 +190,7 @@ export class Sim {
         cubes: 0, upgrades: [], upCount: {}, weapons: [this.newWeapon("gun"), null],
         alive: true, place: 0, kills: 0, lastHurt: -99, lastDeal: -99, shortUntil: -99,
         memory: new Map(), events: [], offers: [], offerSeq: 0, thresholdsHit: 0, lastObsT: 0, heardFrom: 0,
-        stats: {}, wstats: {}, stepAcc: 0, timeMs: [], late: 0, zoneDmg: 0, dmgTaken: 0, dmgDealt: 0, deathCause: "", maxMs: 0, modes: {}, trail: [],
+        stats: {}, wstats: {}, stepAcc: 0, timeMs: [], late: 0, zoneDmg: 0, dmgTaken: 0, dmgDealt: 0, deathCause: "", maxMs: 0, modes: {}, trail: [], shots: 0, gunHits: 0, gunHitsTaken: 0,
       }
       m.yaw = Math.atan2(this.zone.next_center[1] - p[1], this.zone.next_center[0] - p[0])
       this.mechStats(m)
@@ -727,6 +730,7 @@ export class Sim {
           this.projs.push({ id: this.nextId++, kind: "gun", owner: m.id, x: ox + dir[0] * off, y: oy + dir[1] * off, z: oz + dir[2] * off, vx: d2[0] * st.speed, vy: d2[1] * st.speed, vz: d2[2] * st.speed, dist: 0, range: st.range, dmg: st.damage * this.dmgMult(m), ttl: 5 })
           w.cooldown = st.cooldown
           w.ammo--
+          m.shots++
           this.sound("gun", m.x, m.y, m.id)
           if (w.ammo <= 0) {
             w.reload = st.reload
@@ -945,7 +949,13 @@ export class Sim {
         else {
           if (p.kind === "npc") {
             if ("bot" in he.ent) this.damage(he.ent, p.dmg, "npc", this.npcs.find((n) => n.id === p.owner) ?? null, ox, oy)
-          } else this.damage(he.ent, p.dmg, "gun", this.mechs[p.owner], ox, oy)
+          } else {
+            if ("bot" in he.ent) {
+              this.mechs[p.owner].gunHits++
+              ;(he.ent as Mech).gunHitsTaken++
+            }
+            this.damage(he.ent, p.dmg, "gun", this.mechs[p.owner], ox, oy)
+          }
         }
         continue
       }
@@ -1212,7 +1222,7 @@ export class Sim {
     return {
       duration: this.t,
       mechs: this.mechs,
-      places: this.mechs.map((m) => ({ id: m.id, name: m.name, place: m.place, kills: m.kills, cubes: m.cubes, dmgTaken: Math.round(m.dmgTaken), dmgDealt: Math.round(m.dmgDealt), zoneDmg: Math.round(m.zoneDmg), cause: m.deathCause, maxMs: m.maxMs, late: m.late, modes: m.modes })),
+      places: this.mechs.map((m) => ({ shots: m.shots, gunHits: m.gunHits, gunHitsTaken: m.gunHitsTaken, id: m.id, name: m.name, place: m.place, kills: m.kills, cubes: m.cubes, dmgTaken: Math.round(m.dmgTaken), dmgDealt: Math.round(m.dmgDealt), zoneDmg: Math.round(m.zoneDmg), cause: m.deathCause, maxMs: m.maxMs, late: m.late, modes: m.modes })),
     }
   }
 }

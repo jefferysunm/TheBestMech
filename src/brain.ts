@@ -41,6 +41,7 @@ type Item = { id: number; kind: string; x: number; y: number; z: number; t: numb
 type Mode = "zone" | "retreat" | "fight" | "hunt" | "loot" | "drop" | "position" | "evade"
 type Plan = { mode: Mode; dest: V2 | null; target: Track | null; urgent: boolean; face: number | null; why?: string }
 
+const LOSING_RATIO = Number((typeof process !== "undefined" && process.env?.MECH_LOSING) || 0.65)
 const PROFILE = typeof process !== "undefined" && !!process.env?.MECH_PROFILE
 const WEAPON_RANK: Record<string, number> = { laser: 3, lightning: 2, mortar: 1, gun: 0 }
 
@@ -251,11 +252,14 @@ export class Brain {
     const td = performance.now()
     if (PROFILE && td - t0 > 8) console.error(`slow tick t=${this.t} mode=${plan.mode}/${this.modeWhy} total=${(td - t0).toFixed(1)} update=${(ta - t0).toFixed(1)} decide=${(tb - ta).toFixed(1)} move=${(tc - tb).toFixed(1)} fire=${(td - tc).toFixed(1)} expanded=${this.nav?.lastExpanded}`)
 
-    act.move = mv.move
-    act.boost = mv.boost
-    act.jump = mv.jump
-    act.aim = af.aim
-    act.fire = af.fire
+    // never send NaN/Infinity (it would serialize as null and make the action invalid)
+    const fin = (v: number, d: number) => (Number.isFinite(v) ? v : d)
+    const ml = Math.hypot(fin(mv.move[0], 0), fin(mv.move[1], 0))
+    act.move = ml > 1 ? [fin(mv.move[0], 0) / ml, fin(mv.move[1], 0) / ml] : [fin(mv.move[0], 0), fin(mv.move[1], 0)]
+    act.boost = !!mv.boost
+    act.jump = !!mv.jump
+    act.aim = [fin(af.aim[0], me.aim[0]), fin(af.aim[1], 0)]
+    act.fire = [!!af.fire[0], !!af.fire[1]]
     if (af.reload) act.reload = true
     const loot = this.lootAction()
     if (loot) {
@@ -519,8 +523,10 @@ export class Brain {
       timeToKill = target.hp / Math.max(1, myDpsAt(d))
     }
     const outnumbered = seeingMe.length >= 2
-    const lowHp = hpFrac < 0.35 || (hpFrac < 0.55 && outnumbered)
-    const losing = timeToDie < timeToKill * 0.8 && timeToDie < 12
+    // committed duel we're winning on HP: finish it rather than turn and run in the open
+    const winning = !outnumbered && !!target && target.kind === "mech" && seeingMe.includes(target) && target.hp < me.hp * 0.75
+    const lowHp = (hpFrac < 0.35 && !winning) || (hpFrac < 0.55 && outnumbered)
+    const losing = timeToDie < timeToKill * LOSING_RATIO && timeToDie < 12
     const retreat = seeingMe.length > 0 && (lowHp || losing) && !(target && target.hp < 250 && timeToKill < 1.5)
 
     if (zoneUrgent && (outside || !retreat)) {

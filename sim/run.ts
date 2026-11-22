@@ -43,6 +43,7 @@ function roster(): { name: string; make: BotFactory }[] {
 }
 
 const scores: Record<string, number[]> = {}
+const acc: Record<string, { shots: number; hits: number; taken: number; n: number }> = {}
 const extra: Record<string, { zone: number; late: number; maxMs: number; kills: number; cubes: number; causes: Record<string, number>; modes: Record<string, number> }> = {}
 for (let k = 0; k < N; k++) {
   const seed = seed0 + k
@@ -71,6 +72,11 @@ for (let k = 0; k < N; k++) {
   if (flag("verbose") || opt("trace", "")) for (const l of sim.log) console.log("   " + l)
   for (const p of res.places) {
     ;(scores[p.name] ??= []).push(16 - p.place)
+    const a = (acc[p.name] ??= { shots: 0, hits: 0, taken: 0, n: 0 })
+    a.shots += p.shots
+    a.hits += p.gunHits
+    a.taken += p.gunHitsTaken
+    a.n++
     const e = (extra[p.name] ??= { zone: 0, late: 0, maxMs: 0, kills: 0, cubes: 0, causes: {}, modes: {} })
     e.zone += p.zoneDmg
     e.late += p.late
@@ -88,6 +94,8 @@ for (const [name, s] of Object.entries(scores)) {
   const mean = s.reduce((a, b) => a + b, 0) / s.length
   const e = extra[name]
   console.log(`${name.padEnd(12)} n=${String(s.length).padEnd(3)} mean=${mean.toFixed(2)}  kills/m=${(e.kills / s.length).toFixed(2)} cubes/m=${(e.cubes / s.length).toFixed(2)} zoneDmg/m=${(e.zone / s.length).toFixed(0)} late=${e.late} maxMs=${e.maxMs.toFixed(1)} causes=${JSON.stringify(e.causes)}`)
+  const a = acc[name]
+  console.log(`   gun: shots/m=${(a.shots / a.n).toFixed(0)} hit%=${((100 * a.hits) / Math.max(1, a.shots)).toFixed(0)} hitsTaken/m=${(a.taken / a.n).toFixed(1)}`)
   if (name.startsWith("mine")) {
     const tot = Object.values(e.modes).reduce((a, b) => a + b, 0)
     console.log(`   modes: ${Object.entries(e.modes).sort((a, b) => b[1] - a[1]).map(([m, c]) => `${m} ${((100 * c) / tot).toFixed(0)}%`).join(", ")}`)
