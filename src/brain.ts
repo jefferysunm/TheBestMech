@@ -69,7 +69,7 @@ const UPGRADE_PRIORITY = [
   "laser_pierce",
 ]
 
-export type BrainOpts = { name?: string; aggression?: number; debug?: boolean; world?: World | null; nav?: Nav | null }
+export type BrainOpts = { name?: string; aggression?: number; debug?: boolean; world?: World | null; nav?: Nav | null; lurk?: number }
 
 export class Brain {
   name: string
@@ -80,6 +80,9 @@ export class Brain {
   slot: number
   aggression: number
   debugOn: boolean
+  /** until this match time, stay hidden near spawn and only grab loot close by */
+  lurkUntil: number
+  hideSpot: V3 | null = null
 
   // memory
   tracks = new Map<number, Track>()
@@ -150,6 +153,7 @@ export class Brain {
     this.name = opts.name ?? "TheBestMech"
     this.aggression = opts.aggression ?? 1
     this.debugOn = opts.debug ?? true
+    this.lurkUntil = opts.lurk ?? 25
     if (opts.world !== undefined) {
       this.world = opts.world
       this.nav = opts.nav ?? (opts.world ? new Nav(opts.world) : null)
@@ -591,6 +595,14 @@ export class Brain {
       return { mode: "hunt", dest: this.huntSpot(target), target, urgent: false, face: null }
     }
 
+    // early on, let the opening brawl thin out: sit somewhere hidden near spawn
+    if (t < this.lurkUntil && !zoneSoon) {
+      const hs = this.lurkSpot()
+      if (hs) {
+        this.modeWhy = "lurk"
+        return { mode: "position", dest: [hs[0], hs[1]], target: target && target.kind === "mech" ? target : null, urgent: false, face: null }
+      }
+    }
     // default: get to a good spot inside the next circle
     const spot = this.campPoint()
     return { mode: "position", dest: spot, target: target && target.kind === "mech" ? target : null, urgent: zoneSoon, face: null }
@@ -717,6 +729,47 @@ export class Brain {
     }
     this.campSpot = best
     return [best[0], best[1]]
+  }
+
+  /** fraction of surrounding observers (rings at 35/70/120 m, standing on whatever surface is there) that can't see a mech at (x,y,h) */
+  concealment(x: number, y: number, h: number): number {
+    if (!this.world) return 0
+    let hidden = 0, total = 0
+    for (const r of [35, 70, 120]) {
+      for (let q = 0; q < 12; q++) {
+        const b = (q / 12) * Math.PI * 2 + r * 0.013
+        const ox = x + Math.cos(b) * r, oy = y + Math.sin(b) * r
+        if (!this.world.inBounds(ox, oy, 5)) continue
+        const oz = this.world.surface(ox, oy) + 8
+        total++
+        if (!this.los(ox, oy, oz, x, y, h + 4.5) && !this.los(ox, oy, oz, x, y, h + 8.5)) hidden++
+      }
+    }
+    return total ? hidden / total : 0
+  }
+
+  /** a hidden ground spot near where we are (computed once) */
+  lurkSpot(): V3 | null {
+    if (this.hideSpot) return this.hideSpot
+    if (!this.world || !this.nav) return null
+    let best: V3 | null = null
+    let bestS = -Infinity
+    for (let k = 0; k < 30; k++) {
+      const a = this.rng.next() * Math.PI * 2, r = k === 0 ? 0 : 8 + Math.sqrt(this.rng.next()) * 45
+      const x = this.px + Math.cos(a) * r, y = this.py + Math.sin(a) * r
+      const n = this.nav.nodeAt(x, y)
+      if (this.nav.blocked[n] || this.nav.roof[n] || this.nav.clear[n] < 3.2) continue
+      const h = this.nav.h[n]
+      if (Math.abs(h - this.pz) > 3) continue
+      if (!this.inZoneAt(x, y, this.lurkUntil + 5, 10)) continue
+      const s = this.concealment(x, y, h) * 100 - r * 0.3
+      if (s > bestS) {
+        bestS = s
+        best = [x, y, h]
+      }
+    }
+    this.hideSpot = best
+    return best
   }
 
   /** stand-off point for fighting target */
@@ -916,7 +969,7 @@ export class Brain {
       if (p.kind === "gun") continue
       if (rank <= curRank) continue
       const d = this.dist(p.x, p.y)
-      const maxD = slot1 ? 70 : 220
+      const maxD = slot1 ? 70 : t < this.lurkUntil ? 100 : 220
       if (d > maxD || !ok(p.x, p.y) || !this.reachable(p.x, p.y)) continue
       if (p.z - this.pz > 30) continue
       const s = (slot1 ? 40 : 90) + rank * 12 - d * 0.3
@@ -927,7 +980,7 @@ export class Brain {
     }
     if (threatNear && bestS < 40) return null
     // crates: shoot them from range, then the cube/weapon shows up as items
-    if (!threatNear && me.hp > me.max_hp * 0.5) {
+    if (!threatNear && me.hp > me.max_hp * 0.5 && t >= this.lurkUntil) {
       for (const c of this.crates.values()) {
         const d = this.dist(c.x, c.y)
         if (d > 110 || !ok(c.x, c.y)) continue

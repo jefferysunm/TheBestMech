@@ -26,7 +26,7 @@ const world = new World("kit/arena", hello.config.mech.height, hello.config.mech
 const nav = new Nav(world)
 
 const kinds: Record<string, (variant: string) => BotFactory> = {
-  mine: (v) => (h) => new Brain(h, { world, nav: new Nav(world), name: "mine" + v, aggression: v === "agg" ? 1.6 : v === "timid" ? 0.7 : 1 }),
+  mine: (v) => (h) => new Brain(h, { world, nav: new Nav(world), name: "mine" + v, aggression: v === "agg" ? 1.6 : v === "timid" ? 0.7 : 1, ...(process.env.LURK ? { lurk: Number(process.env.LURK) } : {}) }),
   brawler: () => (h) => new Brawler(h, nav, 1),
   sloppy: () => (h) => new Brawler(h, nav, 0.5),
   example: () => (h) => new Example(h),
