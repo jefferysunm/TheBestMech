@@ -62,4 +62,23 @@ tools/ab.sh HEAD 40
 The second command compares the committed bot against the working tree on the same 160 seeds. `--trace mine --every 4` on `sim/run.ts` prints what the bot
 saw and did, and `MECH_PROFILE=1` logs slow decisions.
 
+Navigation stress test (random trips from ground, roof and stadium starts) and answer-time check in the 1-CPU sandbox:
+
+```bash
+bun tools/navtest.ts 40 1
+```
+
+```bash
+python3 tools/latency.py --map-dir /arena -- docker run --rm -i --network none --cpus 1 --memory 512m --read-only --tmpfs /tmp:rw,size=64m --user 65534:65534 -v "$PWD/kit/arena:/arena:ro" thebestmech
+```
+
+### Local results (simulator, not the real server)
+
+| Setup | Mean score (16 − place) | Notes |
+| --- | --- | --- |
+| 1 bot vs 15 `brawler` (160 matches, fresh seeds) | 12.4 | top 3 in 74%, bottom 4 in 11%; an average bot scores 7.5 |
+| 1 bot vs 5 `brawler` + 5 `sloppy` + 5 `example` (40 matches) | 12.75 | |
+| Navigation stress test (240 trips, incl. roof/stadium starts) | 240/240 arrived | median pace ≈ walking speed over the straight-line distance |
+| Decision time in the 1-CPU sandbox | max ≈ 3–5 ms | budget is 50 ms |
+
 The simulator follows `protocol.md` but it is not the real server: treat its numbers as relative, not absolute.
